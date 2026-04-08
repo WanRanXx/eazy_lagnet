@@ -4,9 +4,10 @@
 
 import os
 from dotenv import load_dotenv
-from langchain_core.tools import Tool, tool
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
 
 load_dotenv()
 api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -46,7 +47,7 @@ agent = create_agent(
 # ======================
 response = agent.invoke({
     "messages": [
-        {"role": "user", "content": "北京今天的天气怎么样？"}
+        HumanMessage(content="上海天气怎么样？")
     ]
 })
 
