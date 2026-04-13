@@ -1,8 +1,11 @@
 """
 初次实战，利用eazy_lagent案例3.3.2 实践2：带记忆的文件夹操作助手，创建一个实现github readme.md内容自动补充助手, tavily作为搜索引擎
+使用 ReAct (Reasoning and Acting) 范式实现智能体
 """
 
 import os
+import re
+import json
 from dotenv import load_dotenv
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.chat_history import InMemoryChatMessageHistory, BaseChatMessageHistory
@@ -12,19 +15,18 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_agent
 
 load_dotenv()
 
 api_key = os.getenv("DEEPSEEK_API_KEY")
-base_url = os.getenv("DEEPSEEK_API_BASE")
+base_url = os.getenv("DEEPSEEK_BASE_URL")
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 llm = ChatOpenAI(
     model="deepseek-chat",
     temperature=0.3,
     api_key=api_key,
     base_url=base_url,
-    max_tokens=1024,
+    max_tokens=2048,
     streaming=True
 )
 
@@ -202,19 +204,44 @@ def delete_file(path: str) -> str:
     except Exception as e:
         return f"删除失败：{e}"
 
-prompt = ChatPromptTemplate(
+# =========================
+# 5. 构建 ReAct Agent
+# =========================
+
+# ReAct 提示词模板
+react_prompt = ChatPromptTemplate(
     [
         ("system", """
-        你是一个**计划执行智能体**，严格按照以下流程工作：
-        1. 理解用户需求 → 拆解成清晰的执行步骤（计划）；\n
-        2. 自动调用工具完成每一步（文件操作/联网搜索）；\n
-        3. 执行完成后给出总结；\n
-        4. 保留对话历史，多轮对话保持上下文连贯；\n
-        5. 不需要工具时直接回答;\n
-    
-        可用工具：
-        - 文件管理：列出文件、查看目录树、创建/读取/写入/删除文件;\n
-        - 联网搜索：检索文档、资料、最佳实践; \n
+你是一个遵循 ReAct (Reasoning and Acting) 范式的智能助手。
+
+工作流程：
+1. **Thought (思考)**: 分析当前情况，推理下一步应该做什么
+2. **Action (行动)**: 选择合适的工具并执行
+3. **Observation (观察)**: 获取工具执行结果
+4. 循环执行直到得出最终答案
+
+可用工具：
+- list_files: 查看指定目录下的文件列表
+- view_file_tree: 查看文件夹的树形结构
+- create_file: 创建文件并写入内容
+- read_file: 读取文件内容
+- write_file: 写入文件内容（支持追加或覆盖）
+- delete_file: 删除文件或空文件夹
+- tavily_search_results: 联网搜索文档和资料
+
+输出格式：
+Thought: [你的思考过程]
+Action: [工具名称]
+Action Input: {{"参数名": "参数值"}}
+
+当得出最终答案时，使用：
+Final Answer: [最终回答]
+
+注意：
+- 每次只执行一个工具
+- 仔细分析工具执行结果后再决定下一步
+- 如果不需要工具，直接给出 Final Answer
+- 保持对话历史连贯性
         """),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{user_input}")
@@ -223,14 +250,15 @@ prompt = ChatPromptTemplate(
 
 tools = [list_files, view_file_tree, create_file, read_file, write_file, delete_file, search_tool]
 
-# =========================
-# 6. 构建 Tool-Calling Agent
-# =========================
+# 创建工具映射字典
+tool_map = {tool.name: tool for tool in tools}
 
-chain = prompt | llm.bind_tools(tools)
+# ReAct Agent 链
+react_chain = react_prompt | llm
 
-plan_execute_agent = RunnableWithMessageHistory(
-    runnable=chain,
+# 带记忆的 ReAct Agent
+react_agent = RunnableWithMessageHistory(
+    runnable=react_chain,
     get_session_history=get_window_history,
     history_messages_key="chat_history",
     input_messages_key="user_input",
@@ -239,13 +267,121 @@ plan_execute_agent = RunnableWithMessageHistory(
 )
 
 # =========================
-# 4. 使用示例（对话入口）
+# 6. ReAct 解析和执行函数
+# =========================
+
+def parse_react_output(text: str):
+    """
+    解析 ReAct 格式的输出
+    返回: (thought, action, action_input, final_answer)
+    """
+    thought = None
+    action = None
+    action_input = None
+    final_answer = None
+    
+    # 提取 Thought
+    thought_match = re.search(r'Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|$)', text, re.DOTALL)
+    if thought_match:
+        thought = thought_match.group(1).strip()
+    
+    # 提取 Action 和 Action Input
+    action_match = re.search(r'Action:\s*(.+?)\n', text)
+    if action_match:
+        action = action_match.group(1).strip()
+        
+        # 提取 Action Input (JSON 格式)
+        action_input_match = re.search(r'Action Input:\s*(\{.+?\})', text, re.DOTALL)
+        if action_input_match:
+            try:
+                action_input = json.loads(action_input_match.group(1))
+            except json.JSONDecodeError:
+                action_input = {}
+    
+    # 提取 Final Answer
+    final_answer_match = re.search(r'Final Answer:\s*(.+?)$', text, re.DOTALL)
+    if final_answer_match:
+        final_answer = final_answer_match.group(1).strip()
+    
+    return thought, action, action_input, final_answer
+
+def execute_react_loop(user_input: str, session_id: str, max_iterations: int = 5):
+    """
+    执行 ReAct 循环
+    """
+    history = get_window_history(session_id)
+    
+    for iteration in range(max_iterations):
+        print(f"\n{'='*50}")
+        print(f"🔄 迭代 {iteration + 1}/{max_iterations}")
+        print(f"{'='*50}")
+        
+        # 调用模型
+        result = react_agent.invoke(
+            {"user_input": user_input},
+            config={"configurable": {"session_id": session_id}}
+        )
+        
+        print("\n🧠【模型输出】")
+        print(result.content)
+        
+        # 解析 ReAct 输出
+        thought, action, action_input, final_answer = parse_react_output(result.content)
+        
+        # 如果有最终答案，返回
+        if final_answer:
+            print("\n✅【最终答案】")
+            print(final_answer)
+            return final_answer
+        
+        # 如果没有 action，直接返回模型输出
+        if not action:
+            print("\n✅【直接回答】")
+            return result.content
+        
+        # 执行工具
+        print(f"\n🔧【执行工具】")
+        print(f"Thought: {thought}")
+        print(f"Action: {action}")
+        print(f"Action Input: {action_input}")
+        
+        if action in tool_map:
+            try:
+                tool_func = tool_map[action]
+                observation = tool_func.invoke(action_input or {})
+                
+                print(f"\n📦【观察结果】")
+                print(observation)
+                
+                # 将观察结果添加到历史
+                observation_message = f"Observation: {observation}"
+                history.add_message(AIMessage(content=f"Action: {action}\nAction Input: {action_input}"))
+                history.add_message(HumanMessage(content=observation_message))
+                
+                # 更新 user_input 为观察结果，继续循环
+                user_input = observation_message
+                
+            except Exception as e:
+                error_msg = f"工具执行错误: {str(e)}"
+                print(f"\n❌【错误】{error_msg}")
+                user_input = f"Observation: {error_msg}"
+        else:
+            error_msg = f"未知工具: {action}"
+            print(f"\n❌【错误】{error_msg}")
+            user_input = f"Observation: {error_msg}"
+    
+    print("\n⚠️【达到最大迭代次数】")
+    return "达到最大迭代次数，未能完成任务"
+
+# =========================
+# 7. 使用示例（对话入口）
 # =========================
 if __name__ == "__main__":
-    session_id = "tool_agent_demo"
+    session_id = "react_agent_demo"
 
-    print("===== 🧠 Tool Calling 文件 Agent =====")
-    print("示例：")
+    print("===== 🧠 ReAct 文件 Agent =====")
+    print("ReAct 范式: Thought → Action → Observation → 循环")
+    print("\n示例：")
     print(" - 查看当前文件夹")
     print(" - 创建文件 test.txt 内容 Hello")
     print(" - 写入文件 test.txt 内容 World 追加")
@@ -258,44 +394,6 @@ if __name__ == "__main__":
             print("助手：再见 👋")
             break
 
-        # ===== 第一次：模型思考 =====
-        result = plan_execute_agent.invoke(
-            {"user_input": user_input},
-            config={"configurable": {"session_id": session_id}}
-        )
-
-        history = get_window_history(session_id)
-
-        print("\n🧠【模型输出】")
-        if result.content:
-            print(result.content)
-
-        # ===== 模型决定调用工具 =====
-        if isinstance(result, AIMessage) and result.tool_calls:
-            print("\n🔧【模型决定调用工具】")
-            for call in result.tool_calls:
-                tool_name = call["name"]
-                tool_args = call["args"]
-
-                print(f"➡️ 工具名：{tool_name}")
-                print(f"➡️ 参数：{tool_args}")
-
-                tool_func = next(t for t in tools if t.name == tool_name)
-                observation = tool_func.invoke(tool_args)
-
-                print("\n📦【工具执行结果】")
-                print(observation)
-
-                history.add_message(
-                    ToolMessage(
-                        tool_call_id=call["id"],
-                        content=str(observation)
-                    )
-                )
-
-            print("\n✅【本轮结束：工具执行完成】\n")
-            continue  # 回到 while True 等用户输入
-
-        # ===== 最终回答（没有工具调用） =====
-        print("\n✅【最终回答】")
-        print(result.content, "\n")
+        # 执行 ReAct 循环
+        final_result = execute_react_loop(user_input, session_id)
+        print(f"\n{'='*50}\n")

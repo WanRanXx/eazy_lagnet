@@ -10,7 +10,9 @@ from langchain_core.prompts import PromptTemplate
 # 加载环境变量
 load_dotenv()
 deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-deepseek_api_base = os.getenv("DEEPSEEK_API_BASE")
+deepseek_api_base = os.getenv("DEEPSEEK_BASE_URL")
+print(deepseek_api_key)
+print(deepseek_api_base)
 llm = ChatOpenAI(
     model="deepseek-chat",
     temperature=0.3,

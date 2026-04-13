@@ -38,3 +38,65 @@ Datawhale eazy-langent项目地址 https://datawhalechina.github.io/easy-langent
 - LangChain高级：工具使用、记忆管理、智能体
 - LangGraph：状态机、工作流管理
 - 实际应用：构建智能助手、自动化任务处理
+
+## 核心实现：ReAct 智能体
+
+### ReAct (Reasoning and Acting) 范式
+
+本项目采用 **ReAct 范式** 实现智能助手，这是一种更接近人类思维模式的智能体架构。
+
+#### ReAct 工作流程
+
+```
+用户输入 → Thought (思考) → Action (行动) → Observation (观察) → 循环 → Final Answer
+```
+
+#### 核心特点
+
+1. **Thought (思考)**: 模型分析当前情况，推理下一步应该做什么
+2. **Action (行动)**: 选择合适的工具并执行
+3. **Observation (观察)**: 获取工具执行结果
+4. **循环执行**: 根据观察结果继续思考，直到得出最终答案
+
+#### 与 Tool-Calling 的区别
+
+| 特性 | Tool-Calling | ReAct |
+|------|--------------|-------|
+| 思考过程 | 隐式 | 显式 (Thought) |
+| 执行方式 | 自动调用工具 | 显式循环 (Action → Observation) |
+| 可解释性 | 较低 | 高 (每步都有明确推理) |
+| 调试难度 | 较难 | 容易 (可追踪每一步) |
+| 适用场景 | 简单任务 | 复杂多步骤任务 |
+
+#### 实现文件
+
+- `langchain/langchain_advanced/readme_assistant.py`: ReAct 智能体实现
+  - 文件操作工具：列出文件、查看目录树、创建/读取/写入/删除文件
+  - 联网搜索工具：Tavily 搜索引擎
+  - 记忆管理：滑动窗口记忆机制
+  - ReAct 循环：自动解析和执行 Thought-Action-Observation
+
+#### 使用示例
+
+```python
+# 运行 ReAct 智能体
+python langchain/langchain_advanced/readme_assistant.py
+
+# 示例对话
+你：查看当前文件夹
+🧠【模型输出】
+Thought: 用户想查看当前文件夹的内容，我需要使用 list_files 工具
+Action: list_files
+Action Input: {"path": "."}
+
+🔧【执行工具】
+Action: list_files
+Action Input: {"path": "."}
+
+📦【观察结果】
+README.md
+langchain
+langgraph
+main.py
+...
+```
