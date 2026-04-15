@@ -227,7 +227,7 @@ react_prompt = ChatPromptTemplate(
 - read_file: 读取文件内容
 - write_file: 写入文件内容（支持追加或覆盖）
 - delete_file: 删除文件或空文件夹
-- tavily_search_results: 联网搜索文档和资料
+- search_tool: 联网搜索文档和资料
 
 输出格式：
 Thought: [你的思考过程]
